@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 class Program
 {
@@ -7,13 +8,13 @@ class Program
     {
         try
         {
-            Console.Title = "Zeta Phase 3";
+            Console.Title = "Zeta Phase 4";
             Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.WriteLine("=== ZETA PHASE 3 ===\n");
+            Console.WriteLine("=== ZETA PHASE 4 ===\n");
             Console.ResetColor();
 
             using var mem = new ZetaMemory();
-            if (!mem.Baglan()) { Console.WriteLine("[X] FiveM yok"); Console.ReadLine(); return; }
+            if (!mem.Baglan()) { Console.ReadLine(); return; }
 
             long BA = mem.BaseAddress;
             long worldPtr = mem.Read<long>(BA + 0x25B14B0);
@@ -23,329 +24,319 @@ class Program
             Vector3 lpPos = lpNav > 0x10000 ? mem.Read<Vector3>(lpNav + 0x50) : new Vector3();
 
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"LP:0x{LP:X} HP:{lpHp} Pos:({lpPos.X:F1},{lpPos.Y:F1},{lpPos.Z:F1})");
+            Console.WriteLine($"LP:0x{LP:X} HP:{lpHp:F1} Pos:({lpPos.X:F1},{lpPos.Y:F1},{lpPos.Z:F1})\n");
             Console.ResetColor();
 
             // ═══════════════════════════════
-            //  1. LP SKELETON FULL SCAN
+            // A) LP SKELETON — BRUTE FORCE
             // ═══════════════════════════════
             Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine("\n══ LP SKELETON SCAN ══\n");
+            Console.WriteLine("══ A: LP SKELETON SCAN (0x000-0x2000) ══\n");
             Console.ResetColor();
 
-            bool lpSkelFound = false;
+            byte[] lpData = new byte[0x2000];
+            ZetaMemory.ReadProcessMemory(mem.ProcessHandle, LP, lpData, lpData.Length, out _);
 
-            for (long o = 0x100; o <= 0xB00 && !lpSkelFound; o += 8)
+            bool skelF = false;
+
+            for (int i = 0; i < lpData.Length - 8 && !skelF; i += 8)
             {
-                long sk = mem.Read<long>(LP + o);
-                if (sk < 0x10000 || sk > 0x7FFFFFFFFFFF) continue;
+                long p1 = BitConverter.ToInt64(lpData, i);
+                if (p1 < 0x10000 || p1 > 0x7FFFFFFFFFFF) continue;
 
-                for (long bc = 0; bc <= 0x40 && !lpSkelFound; bc += 8)
+                // Level 1: p1 direct
+                if (TestBones(mem, p1, out int s1, out int po1))
+                { Report(mem, $"LP+0x{i:X} (direct)", p1, s1, po1); skelF = true; break; }
+
+                // Level 2: p1 sub-pointers
+                for (int j = 0; j <= 0x48 && !skelF; j += 8)
                 {
-                    long b = mem.Read<long>(sk + bc);
-                    if (b < 0x10000 || b > 0x7FFFFFFFFFFF) continue;
+                    long p2 = mem.Read<long>(p1 + j);
+                    if (p2 < 0x10000 || p2 > 0x7FFFFFFFFFFF) continue;
 
-                    // Stride 0x20 pos +0x10
-                    int good = 0;
-                    for (int bi = 0; bi < 5; bi++)
-                    {
-                        Vector3 bp = mem.Read<Vector3>(b + (bi * 0x20) + 0x10);
-                        if (!float.IsNaN(bp.X) && MathF.Abs(bp.X) < 5 && MathF.Abs(bp.Y) < 5 && MathF.Abs(bp.Z) < 5
-                            && (MathF.Abs(bp.X) > 0.01f || MathF.Abs(bp.Y) > 0.01f || MathF.Abs(bp.Z) > 0.01f))
-                            good++;
-                    }
-                    if (good >= 3)
-                    {
-                        Console.ForegroundColor = ConsoleColor.Green;
-                        Console.WriteLine($"  BULUNDU! LP+0x{o:X} -> +0x{bc:X} (stride 0x20, pos +0x10)");
-                        for (int bi = 0; bi < 15; bi++)
-                        {
-                            Vector3 bp = mem.Read<Vector3>(b + (bi * 0x20) + 0x10);
-                            Console.WriteLine($"    B[{bi,2}]: ({bp.X:F4}, {bp.Y:F4}, {bp.Z:F4})");
-                        }
-                        Console.ResetColor();
-                        lpSkelFound = true; break;
-                    }
+                    if (TestBones(mem, p2, out int s2, out int po2))
+                    { Report(mem, $"LP+0x{i:X}->+0x{j:X}", p2, s2, po2); skelF = true; break; }
 
-                    // Stride 0x40 pos +0x30
-                    good = 0;
-                    for (int bi = 0; bi < 5; bi++)
+                    // Level 3
+                    for (int k = 0; k <= 0x28 && !skelF; k += 8)
                     {
-                        Vector3 bp = mem.Read<Vector3>(b + (bi * 0x40) + 0x30);
-                        if (!float.IsNaN(bp.X) && MathF.Abs(bp.X) < 5 && MathF.Abs(bp.Y) < 5 && MathF.Abs(bp.Z) < 5
-                            && (MathF.Abs(bp.X) > 0.01f || MathF.Abs(bp.Y) > 0.01f || MathF.Abs(bp.Z) > 0.01f))
-                            good++;
-                    }
-                    if (good >= 3)
-                    {
-                        Console.ForegroundColor = ConsoleColor.Green;
-                        Console.WriteLine($"  BULUNDU! LP+0x{o:X} -> +0x{bc:X} (stride 0x40, pos +0x30)");
-                        for (int bi = 0; bi < 15; bi++)
-                        {
-                            Vector3 bp = mem.Read<Vector3>(b + (bi * 0x40) + 0x30);
-                            Console.WriteLine($"    B[{bi,2}]: ({bp.X:F4}, {bp.Y:F4}, {bp.Z:F4})");
-                        }
-                        Console.ResetColor();
-                        lpSkelFound = true; break;
-                    }
-
-                    // Stride 0x20 pos +0x00
-                    good = 0;
-                    for (int bi = 0; bi < 5; bi++)
-                    {
-                        Vector3 bp = mem.Read<Vector3>(b + (bi * 0x20));
-                        if (!float.IsNaN(bp.X) && MathF.Abs(bp.X) < 5 && MathF.Abs(bp.Y) < 5 && MathF.Abs(bp.Z) < 5
-                            && (MathF.Abs(bp.X) > 0.01f || MathF.Abs(bp.Y) > 0.01f || MathF.Abs(bp.Z) > 0.01f))
-                            good++;
-                    }
-                    if (good >= 3)
-                    {
-                        Console.ForegroundColor = ConsoleColor.Green;
-                        Console.WriteLine($"  BULUNDU! LP+0x{o:X} -> +0x{bc:X} (stride 0x20, pos +0x00)");
-                        for (int bi = 0; bi < 15; bi++)
-                        {
-                            Vector3 bp = mem.Read<Vector3>(b + (bi * 0x20));
-                            Console.WriteLine($"    B[{bi,2}]: ({bp.X:F4}, {bp.Y:F4}, {bp.Z:F4})");
-                        }
-                        Console.ResetColor();
-                        lpSkelFound = true; break;
+                        long p3 = mem.Read<long>(p2 + k);
+                        if (p3 < 0x10000 || p3 > 0x7FFFFFFFFFFF) continue;
+                        if (TestBones(mem, p3, out int s3, out int po3))
+                        { Report(mem, $"LP+0x{i:X}->+0x{j:X}->+0x{k:X}", p3, s3, po3); skelF = true; break; }
                     }
                 }
             }
 
-            if (!lpSkelFound)
+            if (!skelF)
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("  LP Skeleton bulunamadi (0x100-0xB00)");
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("  Local coords bulunamadi. World-coords deneniyor...\n");
                 Console.ResetColor();
 
-                // LP+0x420 raw dump
-                long sk420 = mem.Read<long>(LP + 0x420);
-                Console.WriteLine($"\n  LP+0x420 = 0x{sk420:X}");
-                if (sk420 > 0x10000 && sk420 < 0x7FFFFFFFFFFF)
+                for (int i = 0; i < lpData.Length - 8 && !skelF; i += 8)
                 {
-                    for (long bc = 0; bc <= 0x40; bc += 8)
+                    long p1 = BitConverter.ToInt64(lpData, i);
+                    if (p1 < 0x10000 || p1 > 0x7FFFFFFFFFFF) continue;
+
+                    if (TestBonesWorld(mem, p1, lpPos, out int sw, out int pow))
+                    { ReportW(mem, $"LP+0x{i:X} (direct world)", p1, sw, pow); skelF = true; break; }
+
+                    for (int j = 0; j <= 0x48 && !skelF; j += 8)
                     {
-                        long b = mem.Read<long>(sk420 + bc);
-                        Console.Write($"    +0x{bc:X}=0x{b:X}");
-                        if (b > 0x10000 && b < 0x7FFFFFFFFFFF)
+                        long p2 = mem.Read<long>(p1 + j);
+                        if (p2 < 0x10000 || p2 > 0x7FFFFFFFFFFF) continue;
+
+                        if (TestBonesWorld(mem, p2, lpPos, out int sw2, out int pow2))
+                        { ReportW(mem, $"LP+0x{i:X}->+0x{j:X} (world)", p2, sw2, pow2); skelF = true; break; }
+                    }
+                }
+            }
+
+            if (!skelF)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("  [X] SKELETON BULUNAMADI\n");
+                Console.ResetColor();
+
+                Console.WriteLine("  LP pointer haritasi (0x000-0x800):\n");
+                for (int xx = 0; xx < 0x800; xx += 8)
+                {
+                    long vv = BitConverter.ToInt64(lpData, xx);
+                    if (vv > 0x10000 && vv < 0x7FFFFFFFFFFF)
+                    {
+                        // Her pointer icin kisa bone testi yap
+                        string tag = "";
+                        byte[] test = new byte[256];
+                        if (ZetaMemory.ReadProcessMemory(mem.ProcessHandle, vv, test, 256, out IntPtr tbr) && tbr.ToInt64() >= 48)
                         {
-                            Console.Write(" floats:");
-                            for (int ri = 0; ri < 128; ri += 4)
+                            // Check for small float sequences
+                            int sf2 = 0;
+                            for (int fi = 0; fi < 48; fi += 4)
                             {
-                                byte[] raw = new byte[4];
-                                ZetaMemory.ReadProcessMemory(mem.ProcessHandle, b + ri, raw, 4, out _);
-                                float fv = BitConverter.ToSingle(raw, 0);
-                                if (MathF.Abs(fv) > 0.005f && MathF.Abs(fv) < 10f && !float.IsNaN(fv))
-                                    Console.Write($" [0x{ri:X}={fv:F3}]");
+                                float fv = BitConverter.ToSingle(test, fi);
+                                if (!float.IsNaN(fv) && MathF.Abs(fv) > 0.001f && MathF.Abs(fv) < 3f) sf2++;
                             }
+                            if (sf2 >= 4) tag = $" [small_floats:{sf2}]";
+
+                            // Check for LP-pos-like floats
+                            int wf = 0;
+                            for (int fi = 0; fi < 48; fi += 4)
+                            {
+                                float fv = BitConverter.ToSingle(test, fi);
+                                if (!float.IsNaN(fv) && MathF.Abs(fv - lpPos.X) < 5) wf++;
+                                if (!float.IsNaN(fv) && MathF.Abs(fv - lpPos.Y) < 5) wf++;
+                            }
+                            if (wf >= 2) tag += $" [world_near:{wf}]";
                         }
-                        Console.WriteLine();
+                        Console.WriteLine($"    +0x{xx:X3} => 0x{vv:X}{tag}");
                     }
                 }
             }
 
             // ═══════════════════════════════
-            //  2. PED LIST - DEEP SCAN
+            // B) REAL PED LIST — LP REVERSE LOOKUP
             // ═══════════════════════════════
             Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine("\n══ PED LIST DEEP ══\n");
+            Console.WriteLine("\n══ B: LP REVERSE LOOKUP ══\n");
             Console.ResetColor();
 
-            long c1 = mem.Read<long>(worldPtr + 0x10);
-            long c2 = c1 > 0x10000 ? mem.Read<long>(c1 + 0x58) : 0;
-            long c3 = c2 > 0x10000 ? mem.Read<long>(c2 + 0x18) : 0;
-            long pedList = c3 > 0x10000 ? mem.Read<long>(c3 + 0x8) : 0;
-            int pedMax = c3 > 0x10000 ? mem.Read<int>(c3 + 0x10) : 0;
+            byte[] worldData = new byte[0x800];
+            ZetaMemory.ReadProcessMemory(mem.ProcessHandle, worldPtr, worldData, worldData.Length, out _);
 
-            Console.WriteLine($"  List:0x{pedList:X} Max:{pedMax}");
+            bool lpFound = false;
 
-            if (pedList > 0x10000 && pedMax > 0)
+            for (int wo = 0; wo < 0x800 - 8 && !lpFound; wo += 8)
             {
-                if (pedMax > 200) pedMax = 200;
-                int shown = 0;
+                long ws = BitConverter.ToInt64(worldData, wo);
+                if (ws < 0x10000 || ws > 0x7FFFFFFFFFFF) continue;
 
-                for (int i = 0; i < pedMax && shown < 6; i++)
+                // Level 1: search this structure for LP
+                if (SearchForLP(mem, ws, LP, $"W+0x{wo:X}", ref lpFound)) continue;
+
+                // Level 2: sub-pointers
+                byte[] d1 = new byte[0x400];
+                if (!ZetaMemory.ReadProcessMemory(mem.ProcessHandle, ws, d1, d1.Length, out IntPtr br1)) continue;
+                int sc1 = 0;
+                for (int s1 = 0; s1 < Math.Min((int)br1.ToInt64(), 0x200) - 8 && !lpFound && sc1 < 30; s1 += 8)
                 {
-                    long ped = mem.Read<long>(pedList + (i * 0x10));
-                    if (ped < 0x10000 || ped == LP || ped > 0x7FFFFFFFFFFF) continue;
-                    if (Math.Abs(ped - pedList) < 0x10000) continue;
+                    long sv1 = BitConverter.ToInt64(d1, s1);
+                    if (sv1 < 0x10000 || sv1 > 0x7FFFFFFFFFFF || sv1 == ws) continue;
+                    sc1++;
 
-                    byte[] pd = new byte[4096];
-                    if (!ZetaMemory.ReadProcessMemory(mem.ProcessHandle, ped, pd, pd.Length, out IntPtr rb)) continue;
-                    if (rb.ToInt64() < 2048) continue;
+                    if (SearchForLP(mem, sv1, LP, $"W+0x{wo:X}->+0x{s1:X}", ref lpFound)) break;
 
-                    Console.ForegroundColor = ConsoleColor.White;
-                    Console.WriteLine($"\n  ── [{i}] 0x{ped:X} ──");
-                    Console.ResetColor();
-
-                    // HP scan (float 50-500)
-                    Console.Write("  HP:");
-                    int hc = 0;
-                    for (int off = 0; off < 2048 && hc < 10; off += 4)
+                    // Level 3
+                    byte[] d2 = new byte[0x400];
+                    if (!ZetaMemory.ReadProcessMemory(mem.ProcessHandle, sv1, d2, d2.Length, out IntPtr br2)) continue;
+                    int sc2 = 0;
+                    for (int s2 = 0; s2 < Math.Min((int)br2.ToInt64(), 0x200) - 8 && !lpFound && sc2 < 15; s2 += 8)
                     {
-                        float v = BitConverter.ToSingle(pd, off);
-                        if (!float.IsNaN(v) && !float.IsInfinity(v) && v >= 50f && v <= 500f)
-                        { Console.Write($" 0x{off:X}={v:F0}"); hc++; }
+                        long sv2 = BitConverter.ToInt64(d2, s2);
+                        if (sv2 < 0x10000 || sv2 > 0x7FFFFFFFFFFF || sv2 == sv1) continue;
+                        sc2++;
+                        SearchForLP(mem, sv2, LP, $"W+0x{wo:X}->+0x{s1:X}->+0x{s2:X}", ref lpFound);
                     }
-                    if (hc == 0)
-                    {
-                        // Also check for smaller HP values (1-50)
-                        Console.Write(" (1-50):");
-                        for (int off = 0; off < 2048 && hc < 5; off += 4)
-                        {
-                            float v = BitConverter.ToSingle(pd, off);
-                            if (!float.IsNaN(v) && !float.IsInfinity(v) && v >= 1f && v < 50f)
-                            { Console.Write($" 0x{off:X}={v:F1}"); hc++; }
-                        }
-                    }
-                    if (hc == 0) Console.Write(" -yok-");
-                    Console.WriteLine();
-
-                    // Raw at 0x280
-                    Console.WriteLine($"  +0x280=0x{BitConverter.ToUInt32(pd, 0x280):X8}");
-
-                    // Nav/Pos scan
-                    Console.Write("  Pos:");
-                    int pc = 0;
-                    for (int off = 0; off < 256 && pc < 5; off += 8)
-                    {
-                        long ptr = BitConverter.ToInt64(pd, off);
-                        if (ptr < 0x10000 || ptr > 0x7FFFFFFFFFFF) continue;
-
-                        foreach (int po in new[] { 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90 })
-                        {
-                            Vector3 p = mem.Read<Vector3>(ptr + po);
-                            if (!float.IsNaN(p.X) && MathF.Abs(p.X) > 10 && MathF.Abs(p.X) < 10000
-                                && MathF.Abs(p.Y) > 10 && MathF.Abs(p.Y) < 10000)
-                            {
-                                Console.Write($" +0x{off:X}->0x{po:X}=({p.X:F0},{p.Y:F0},{p.Z:F0})");
-                                pc++; break;
-                            }
-                        }
-                    }
-                    if (pc == 0) Console.Write(" -yok-");
-                    Console.WriteLine();
-
-                    // Skeleton
-                    long psk = BitConverter.ToInt64(pd, 0x420);
-                    if (psk > 0x10000 && psk < 0x7FFFFFFFFFFF)
-                    {
-                        long pbc = mem.Read<long>(psk + 0x18);
-                        if (pbc > 0x10000)
-                        {
-                            Console.Write("  Bones20:");
-                            for (int bi = 0; bi < 5; bi++)
-                            {
-                                Vector3 bp = mem.Read<Vector3>(pbc + (bi * 0x20) + 0x10);
-                                Console.Write($" ({bp.X:F3},{bp.Y:F3},{bp.Z:F3})");
-                            }
-                            Console.WriteLine();
-                            Console.Write("  Bones40:");
-                            for (int bi = 0; bi < 5; bi++)
-                            {
-                                Vector3 bp = mem.Read<Vector3>(pbc + (bi * 0x40) + 0x30);
-                                Console.Write($" ({bp.X:F3},{bp.Y:F3},{bp.Z:F3})");
-                            }
-                            Console.WriteLine();
-                        }
-                        else Console.WriteLine("  Skel: bc=null");
-                    }
-                    else Console.WriteLine("  Skel: null");
-
-                    // PedType
-                    Console.Write("  Type:");
-                    foreach (int to in new[] { 0x1088, 0x10B8, 0x10A8, 0x10C8 })
-                    {
-                        if (to + 4 <= pd.Length)
-                        {
-                            int pt = BitConverter.ToInt32(pd, to);
-                            Console.Write($" 0x{to:X}={pt}({pt & 0xFF})");
-                        }
-                    }
-                    Console.WriteLine();
-
-                    shown++;
                 }
+            }
 
-                if (shown == 0)
+            if (!lpFound)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("  LP World sub-ptr'lerde bulunamadi.\n");
+                Console.ResetColor();
+
+                // Fallback: pattern scan for entity pool
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("  Pattern scan deneniyor...\n");
+                Console.ResetColor();
+
+                int modSize = mem.TargetProcess!.MainModule!.ModuleMemorySize;
+                byte[] modData = new byte[modSize];
+                int chunk = 1024 * 1024;
+                for (int off = 0; off < modSize; off += chunk)
                 {
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine("\n  Listede valid ped yok! Birinin YANINDA ol.");
-                    Console.ResetColor();
+                    int sz = Math.Min(chunk, modSize - off);
+                    byte[] buf = new byte[sz];
+                    if (ZetaMemory.ReadProcessMemory(mem.ProcessHandle, BA + off, buf, sz, out IntPtr mbr))
+                        Array.Copy(buf, 0, modData, off, (int)mbr.ToInt64());
+                    Console.Write($"\r  Okunuyor {(off + sz) * 100 / modSize}%  ");
+                }
+                Console.WriteLine();
+
+                var patterns = new[]
+                {
+                    ("Replay1", "48 8B 0D ?? ?? ?? ?? 48 8D 59 20"),
+                    ("Replay2", "48 8B 0D ?? ?? ?? ?? 48 8B D9 48 85 C9"),
+                    ("Replay3", "48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 48"),
+                    ("PedPool", "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 ?? 8B 48"),
+                    ("EntPool", "4C 8B 0D ?? ?? ?? ?? 4D 85 C9 74"),
+                    ("EntityP", "48 8B 0D ?? ?? ?? ?? 48 85 C9 74 ?? 48 8B 41"),
+                    ("PedFac",  "48 8B 05 ?? ?? ?? ?? 48 8B 48 ?? E8 ?? ?? ?? ?? 48 8B"),
+                };
+
+                var seen = new HashSet<long>();
+                foreach (var (name, patStr) in patterns)
+                {
+                    byte?[] pat = Parse(patStr);
+                    var matches = Scan(modData, pat);
+
+                    foreach (int pos in matches)
+                    {
+                        int disp = BitConverter.ToInt32(modData, pos + 3);
+                        long resolved = (long)pos + 7 + disp;
+                        if (resolved <= 0 || resolved >= modSize) continue;
+
+                        long addr = BA + resolved;
+                        long ptr = mem.Read<long>(addr);
+                        if (ptr < 0x10000 || ptr > 0x7FFFFFFFFFFF) continue;
+                        if (seen.Contains(ptr)) continue;
+                        seen.Add(ptr);
+
+                        // Search this pointer's structure for ped-like arrays
+                        byte[] pd = new byte[0x400];
+                        if (!ZetaMemory.ReadProcessMemory(mem.ProcessHandle, ptr, pd, pd.Length, out _)) continue;
+
+                        for (int off = 0; off < 0x3F0; off += 8)
+                        {
+                            long lp = BitConverter.ToInt64(pd, off);
+                            if (lp < 0x10000 || lp > 0x7FFFFFFFFFFF) continue;
+                            int cnt = BitConverter.ToInt32(pd, off + 8);
+                            if (cnt < 2 || cnt > 500) continue;
+
+                            int valid = 0;
+                            for (int k = 0; k < Math.Min(cnt, 20); k++)
+                            {
+                                for (int stride = 0x8; stride <= 0x10; stride += 0x8)
+                                {
+                                    long ped = mem.Read<long>(lp + (k * stride));
+                                    if (ped < 0x10000) continue;
+                                    if (ped == LP) { valid += 10; continue; }
+                                    float hp = mem.Read<float>(ped + 0x280);
+                                    if (hp > 0 && hp < 1000 && !float.IsNaN(hp))
+                                    {
+                                        long nav = mem.Read<long>(ped + 0x30);
+                                        if (nav > 0x10000)
+                                        {
+                                            Vector3 p = mem.Read<Vector3>(nav + 0x50);
+                                            if (MathF.Abs(p.X) > 1) valid++;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (valid >= 2)
+                            {
+                                Console.ForegroundColor = ConsoleColor.Green;
+                                Console.WriteLine($"\n  {name} PED LIST! 0x{resolved:X}->+0x{off:X}");
+                                Console.WriteLine($"    List:0x{lp:X} Count:{cnt}");
+
+                                int sh = 0;
+                                for (int k = 0; k < Math.Min(cnt, 30) && sh < 8; k++)
+                                {
+                                    long ped = mem.Read<long>(lp + (k * 0x10));
+                                    if (ped < 0x10000) { ped = mem.Read<long>(lp + (k * 0x8)); }
+                                    if (ped < 0x10000) continue;
+                                    float hp = mem.Read<float>(ped + 0x280);
+                                    string tag = ped == LP ? " <-LP" : "";
+                                    long nav = mem.Read<long>(ped + 0x30);
+                                    Vector3 p = nav > 0x10000 ? mem.Read<Vector3>(nav + 0x50) : new Vector3();
+                                    Console.WriteLine($"    [{k}] 0x{ped:X} HP:{hp:F0} ({p.X:F0},{p.Y:F0},{p.Z:F0}){tag}");
+                                    sh++;
+                                }
+                                Console.ResetColor();
+                                lpFound = true;
+                            }
+                        }
+                    }
                 }
             }
 
             // ═══════════════════════════════
-            //  3. VIEWMATRIX W2S TEST
+            // C) VIEWMATRIX TEST
             // ═══════════════════════════════
             Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine("\n══ VIEWMATRIX W2S TEST ══\n");
+            Console.WriteLine("\n══ C: VIEWMATRIX ══\n");
             Console.ResetColor();
 
             long vmPtr = mem.Read<long>(BA + 0x2591ED0);
             if (vmPtr > 0x10000)
             {
-                Console.WriteLine($"  VM Ptr: 0x{vmPtr:X}");
-
-                foreach (long vmOff in new long[] { 0x1E0, 0x24C, 0x260, 0x280, 0x2A0, 0x300, 0x340, 0x380 })
+                // Test +0x300 and nearby
+                foreach (long vmOff in new long[] { 0x2A0, 0x300, 0x340, 0x380 })
                 {
-                    byte[] tb = new byte[64];
-                    ZetaMemory.ReadProcessMemory(mem.ProcessHandle, vmPtr + vmOff, tb, 64, out _);
-                    float[] m = new float[16];
-                    Buffer.BlockCopy(tb, 0, m, 0, 64);
+                    byte[] vmBuf = new byte[64];
+                    ZetaMemory.ReadProcessMemory(mem.ProcessHandle, vmPtr + vmOff, vmBuf, 64, out _);
+                    float[] vm = new float[16];
+                    Buffer.BlockCopy(vmBuf, 0, vm, 0, 64);
 
-                    bool hasNaN = false;
+                    bool ok = true;
                     for (int mi = 0; mi < 16; mi++)
-                        if (float.IsNaN(m[mi]) || float.IsInfinity(m[mi])) { hasNaN = true; break; }
-                    if (hasNaN) continue;
+                        if (float.IsNaN(vm[mi]) || float.IsInfinity(vm[mi])) { ok = false; break; }
+                    if (!ok) { Console.WriteLine($"  +0x{vmOff:X}: NaN/Inf"); continue; }
 
-                    float w = m[3] * lpPos.X + m[7] * lpPos.Y + m[11] * lpPos.Z + m[15];
-                    if (MathF.Abs(w) < 0.001f) continue;
+                    float w = vm[3] * lpPos.X + vm[7] * lpPos.Y + vm[11] * lpPos.Z + vm[15];
+                    if (MathF.Abs(w) < 0.01f) { Console.WriteLine($"  +0x{vmOff:X}: W=0"); continue; }
 
                     float inv = 1f / w;
-                    float nx = (m[0] * lpPos.X + m[4] * lpPos.Y + m[8] * lpPos.Z + m[12]) * inv;
-                    float ny = (m[1] * lpPos.X + m[5] * lpPos.Y + m[9] * lpPos.Z + m[13]) * inv;
+                    float nx = (vm[0] * lpPos.X + vm[4] * lpPos.Y + vm[8] * lpPos.Z + vm[12]) * inv;
+                    float ny = (vm[1] * lpPos.X + vm[5] * lpPos.Y + vm[9] * lpPos.Z + vm[13]) * inv;
                     float sx = 960 + nx * 960;
                     float sy = 540 - ny * 540;
 
-                    string ok = (sx > 0 && sx < 1920 && sy > 0 && sy < 1080) ? "EKRANDA" : "dis";
-                    Console.WriteLine($"  +0x{vmOff:X}: S({sx:F0},{sy:F0}) NDC({nx:F3},{ny:F3}) W:{w:F2} [{ok}]");
-                }
-
-                // Also try reading VM as direct matrix from base (not through pointer)
-                Console.WriteLine("\n  Direct VM (base+ offsets):");
-                foreach (long dOff in new long[] { 0x1FCBD0, 0x1F4BD0, 0x1FEBD0, 0x200BD0 })
-                {
-                    byte[] tb = new byte[64];
-                    ZetaMemory.ReadProcessMemory(mem.ProcessHandle, BA + dOff, tb, 64, out _);
-                    float[] m = new float[16];
-                    Buffer.BlockCopy(tb, 0, m, 0, 64);
-
-                    bool hasNaN = false;
-                    for (int mi = 0; mi < 16; mi++)
-                        if (float.IsNaN(m[mi]) || float.IsInfinity(m[mi])) { hasNaN = true; break; }
-                    if (hasNaN) { Console.WriteLine($"    0x{dOff:X}: NaN"); continue; }
-
-                    float w = m[3] * lpPos.X + m[7] * lpPos.Y + m[11] * lpPos.Z + m[15];
-                    if (MathF.Abs(w) < 0.001f) { Console.WriteLine($"    0x{dOff:X}: W=0"); continue; }
-
-                    float inv = 1f / w;
-                    float nx = (m[0] * lpPos.X + m[4] * lpPos.Y + m[8] * lpPos.Z + m[12]) * inv;
-                    float ny = (m[1] * lpPos.X + m[5] * lpPos.Y + m[9] * lpPos.Z + m[13]) * inv;
-                    float sx = 960 + nx * 960;
-                    float sy = 540 - ny * 540;
-
-                    string ok = (sx > 0 && sx < 1920 && sy > 0 && sy < 1080) ? "EKRANDA" : "dis";
-                    Console.WriteLine($"    0x{dOff:X}: S({sx:F0},{sy:F0}) W:{w:F2} [{ok}]");
+                    string status = (sx > 0 && sx < 1920 && sy > 0 && sy < 1080) ? "EKRANDA" : "dis";
+                    Console.WriteLine($"  +0x{vmOff:X}: S({sx:F0},{sy:F0}) W:{w:F2} [{status}]");
+                    Console.WriteLine($"    [{vm[0]:F4},{vm[1]:F4},{vm[2]:F4},{vm[3]:F4}]");
+                    Console.WriteLine($"    [{vm[4]:F4},{vm[5]:F4},{vm[6]:F4},{vm[7]:F4}]");
+                    Console.WriteLine($"    [{vm[8]:F4},{vm[9]:F4},{vm[10]:F4},{vm[11]:F4}]");
+                    Console.WriteLine($"    [{vm[12]:F4},{vm[13]:F4},{vm[14]:F4},{vm[15]:F4}]");
                 }
             }
 
             Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.WriteLine("\n══════════════════════════");
-            Console.WriteLine("  PHASE 3 BITTI!");
-            Console.WriteLine("  TUM CIKTIYI KOPYALA!");
-            Console.WriteLine("══════════════════════════\n");
+            Console.WriteLine("\n═════════════════════════");
+            Console.WriteLine("  PHASE 4 BITTI!");
+            Console.WriteLine("  CIKTIYI KOPYALA!");
             Console.ResetColor();
             Console.ReadLine();
         }
@@ -356,5 +347,166 @@ class Program
             Console.ResetColor();
             Console.ReadLine();
         }
+    }
+
+    static bool TestBones(ZetaMemory mem, long addr, out int fStride, out int fPosOff)
+    {
+        fStride = 0; fPosOff = 0;
+        byte[] raw = new byte[2048];
+        if (!ZetaMemory.ReadProcessMemory(mem.ProcessHandle, addr, raw, 2048, out IntPtr br)) return false;
+        if (br.ToInt64() < 320) return false;
+        int len = (int)br.ToInt64();
+
+        foreach (int stride in new[] { 0x10, 0x20, 0x30, 0x40, 0x50, 0x60 })
+        {
+            for (int po = 0; po + 12 <= stride; po += 4)
+            {
+                int good = 0, total = Math.Min(20, (len - po - 12) / stride);
+                if (total < 5) continue;
+                bool bad = false;
+
+                for (int b = 0; b < total && !bad; b++)
+                {
+                    int off = b * stride + po;
+                    float x = BitConverter.ToSingle(raw, off);
+                    float y = BitConverter.ToSingle(raw, off + 4);
+                    float z = BitConverter.ToSingle(raw, off + 8);
+
+                    if (float.IsNaN(x) || float.IsNaN(y) || float.IsNaN(z)) { bad = true; break; }
+                    if (float.IsInfinity(x) || float.IsInfinity(y) || float.IsInfinity(z)) { bad = true; break; }
+
+                    bool inR = MathF.Abs(x) < 3 && MathF.Abs(y) < 3 && MathF.Abs(z) < 3;
+                    bool nz = MathF.Abs(x) > 0.005f || MathF.Abs(y) > 0.005f || MathF.Abs(z) > 0.005f;
+                    if (inR && nz) good++;
+                }
+
+                if (!bad && good >= 5) { fStride = stride; fPosOff = po; return true; }
+            }
+        }
+        return false;
+    }
+
+    static bool TestBonesWorld(ZetaMemory mem, long addr, Vector3 lp, out int fStride, out int fPosOff)
+    {
+        fStride = 0; fPosOff = 0;
+        byte[] raw = new byte[2048];
+        if (!ZetaMemory.ReadProcessMemory(mem.ProcessHandle, addr, raw, 2048, out IntPtr br)) return false;
+        if (br.ToInt64() < 320) return false;
+        int len = (int)br.ToInt64();
+
+        foreach (int stride in new[] { 0x10, 0x20, 0x30, 0x40, 0x50, 0x60 })
+        {
+            for (int po = 0; po + 12 <= stride; po += 4)
+            {
+                int good = 0, total = Math.Min(15, (len - po - 12) / stride);
+                if (total < 5) continue;
+
+                for (int b = 0; b < total; b++)
+                {
+                    int off = b * stride + po;
+                    float x = BitConverter.ToSingle(raw, off);
+                    float y = BitConverter.ToSingle(raw, off + 4);
+                    float z = BitConverter.ToSingle(raw, off + 8);
+
+                    if (float.IsNaN(x) || float.IsNaN(y) || float.IsNaN(z)) break;
+                    if (MathF.Abs(x - lp.X) < 5 && MathF.Abs(y - lp.Y) < 5 && MathF.Abs(z - lp.Z) < 5)
+                        good++;
+                }
+
+                if (good >= 5) { fStride = stride; fPosOff = po; return true; }
+            }
+        }
+        return false;
+    }
+
+    static bool SearchForLP(ZetaMemory mem, long structAddr, long LP, string path, ref bool found)
+    {
+        byte[] d = new byte[0x2000];
+        if (!ZetaMemory.ReadProcessMemory(mem.ProcessHandle, structAddr, d, d.Length, out IntPtr br)) return false;
+        int len = (int)br.ToInt64();
+
+        for (int i = 0; i < len - 8; i += 8)
+        {
+            if (BitConverter.ToInt64(d, i) == LP)
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"  LP BULUNDU! {path} offset +0x{i:X}");
+                Console.ResetColor();
+
+                for (int stride = 0x8; stride <= 0x10; stride += 0x8)
+                {
+                    Console.Write($"    Stride 0x{stride:X}:");
+                    for (int di = -3; di <= 5; di++)
+                    {
+                        int nOff = i + (di * stride);
+                        if (nOff < 0 || nOff + 8 > len) continue;
+                        long nv = BitConverter.ToInt64(d, nOff);
+                        if (nv < 0x1000) continue;
+                        string tag = nv == LP ? "(LP)" : "";
+                        float hp = 0;
+                        if (nv > 0x10000 && nv < 0x7FFFFFFFFFFF && nv != LP)
+                        {
+                            hp = mem.Read<float>(nv + 0x280);
+                            long nav = mem.Read<long>(nv + 0x30);
+                            Vector3 p = nav > 0x10000 ? mem.Read<Vector3>(nav + 0x50) : new Vector3();
+                            Console.Write($" [{di}]HP:{hp:F0}({p.X:F0},{p.Y:F0})");
+                        }
+                        else Console.Write($" [{di}]{tag}");
+                    }
+                    Console.WriteLine();
+                }
+                found = true;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static void Report(ZetaMemory mem, string path, long addr, int stride, int posOff)
+    {
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"\n  SKELETON BULUNDU! {path}");
+        Console.WriteLine($"  Stride:0x{stride:X} PosOff:0x{posOff:X}\n");
+        for (int b = 0; b < 20; b++)
+        {
+            Vector3 bp = mem.Read<Vector3>(addr + (b * stride) + posOff);
+            Console.WriteLine($"    B[{b,2}]: ({bp.X:F4}, {bp.Y:F4}, {bp.Z:F4})");
+        }
+        Console.ResetColor();
+    }
+
+    static void ReportW(ZetaMemory mem, string path, long addr, int stride, int posOff)
+    {
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"\n  WORLD-BONES BULUNDU! {path}");
+        Console.WriteLine($"  Stride:0x{stride:X} PosOff:0x{posOff:X}\n");
+        for (int b = 0; b < 15; b++)
+        {
+            Vector3 bp = mem.Read<Vector3>(addr + (b * stride) + posOff);
+            Console.WriteLine($"    B[{b,2}]: ({bp.X:F1}, {bp.Y:F1}, {bp.Z:F1})");
+        }
+        Console.ResetColor();
+    }
+
+    static byte?[] Parse(string p)
+    {
+        string[] s = p.Split(' ');
+        byte?[] r = new byte?[s.Length];
+        for (int i = 0; i < s.Length; i++)
+            r[i] = s[i] == "??" ? null : Convert.ToByte(s[i], 16);
+        return r;
+    }
+
+    static List<int> Scan(byte[] data, byte?[] pat)
+    {
+        var r = new List<int>();
+        for (int i = 0; i <= data.Length - pat.Length; i++)
+        {
+            bool ok = true;
+            for (int j = 0; j < pat.Length; j++)
+                if (pat[j].HasValue && data[i + j] != pat[j].Value) { ok = false; break; }
+            if (ok) r.Add(i);
+        }
+        return r;
     }
 }

@@ -8,367 +8,255 @@ class Program
     {
         try
         {
-            Console.Title = "Zeta Offset Scanner";
+            Console.Title = "Zeta Phase 2";
             Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.WriteLine("=== ZETA OFFSET SCANNER ===\n");
+            Console.WriteLine("=== ZETA PHASE 2 SCANNER ===\n");
             Console.ResetColor();
 
             using var mem = new ZetaMemory();
-            if (!mem.Baglan())
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("[X] FiveM bulunamadi!");
-                Console.ResetColor();
-                Console.ReadLine();
-                return;
-            }
+            if (!mem.Baglan()) { Console.WriteLine("[X] FiveM bulunamadi!"); Console.ReadLine(); return; }
 
-            long baseAddr = mem.BaseAddress;
-            int moduleSize = mem.TargetProcess!.MainModule!.ModuleMemorySize;
+            long BA = mem.BaseAddress;
+
+            // Phase 1 sonuclari
+            long worldPtr = mem.Read<long>(BA + 0x25B14B0);
+            long LP = mem.Read<long>(worldPtr + 0x8);
+            float lpHp = mem.Read<float>(LP + 0x280);
+            long lpNav = mem.Read<long>(LP + 0x30);
+            Vector3 lpPos = mem.Read<Vector3>(lpNav + 0x50);
 
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"[OK] PID: {mem.TargetProcess.Id}");
-            Console.WriteLine($"[OK] Base: 0x{baseAddr:X}");
-            Console.WriteLine($"[OK] Size: {moduleSize / 1024 / 1024} MB\n");
+            Console.WriteLine($"[OK] World: 0x{worldPtr:X}");
+            Console.WriteLine($"[OK] LP: 0x{LP:X}  HP: {lpHp:F1}");
+            Console.WriteLine($"[OK] Pos: ({lpPos.X:F1}, {lpPos.Y:F1}, {lpPos.Z:F1})\n");
             Console.ResetColor();
 
-            // ── Tum modulu oku ──
+            // ═══════════════════════════════════
+            //  1. WORLD STRUCTURE DUMP
+            // ═══════════════════════════════════
             Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine("[*] Bellek okunuyor... (30-60 sn surebilir)");
+            Console.WriteLine("══════ WORLD STRUCTURE ══════\n");
             Console.ResetColor();
 
-            byte[] data = new byte[moduleSize];
-            int totalRead = 0;
-            int chunk = 1024 * 1024;
-
-            for (int off = 0; off < moduleSize; off += chunk)
+            byte[] wd = BulkRead(mem, worldPtr, 0x800);
+            var wp = GetPointers(wd);
+            foreach (var (o, v) in wp)
             {
-                int sz = Math.Min(chunk, moduleSize - off);
-                byte[] buf = new byte[sz];
-                if (ZetaMemory.ReadProcessMemory(mem.ProcessHandle, baseAddr + off, buf, sz, out IntPtr br))
-                {
-                    int r = (int)br.ToInt64();
-                    Array.Copy(buf, 0, data, off, r);
-                    totalRead += r;
-                }
-                Console.Write($"\r[*] Okunuyor... {(off + sz) * 100 / moduleSize}%   ");
+                string l = o == 8 ? " <- LP" : "";
+                Console.WriteLine($"  +0x{o:X3} => 0x{v:X}{l}");
             }
-            Console.WriteLine($"\n[OK] {totalRead / 1024 / 1024} MB okundu\n");
 
-            // ═══════════════════════════════════════
-            //  1. WORLD POINTER — Pattern Scan
-            // ═══════════════════════════════════════
-            Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.WriteLine("══════ WORLD POINTER ══════\n");
+            // ═══════════════════════════════════
+            //  2. PED LIST DEEP SEARCH
+            // ═══════════════════════════════════
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("\n══════ PED LIST SEARCH (1-3 dk) ══════\n");
             Console.ResetColor();
 
-            var worldPatterns = new[]
+            long fList = 0; int fMax = 0, fStride = 0; string fPath = "";
+            int prog = 0;
+
+            foreach (var (wOff, wVal) in wp)
             {
-                ("W1", "48 8B 05 ?? ?? ?? ?? 45 ?? ?? ?? ?? 48 8B 48 08 48 85 C9 74"),
-                ("W2", "48 8B 05 ?? ?? ?? ?? 48 8B 48 08 48 85 C9 74"),
-                ("W3", "48 8B 05 ?? ?? ?? ?? 33 ED 48 8B 48 08"),
-                ("W4", "48 8B 1D ?? ?? ?? ?? 48 8B 5B 08"),
-                ("W5", "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 ?? 48 8B 48 08"),
-                ("W6", "48 8B 05 ?? ?? ?? ?? 48 8D ?? ?? 48 8B 48 08"),
-            };
+                if (wOff == 8 || fList != 0) continue;
+                prog++;
+                Console.Write($"\r  [{prog}/{wp.Count}] World+0x{wOff:X3}...          ");
 
-            long worldOffset = 0;
-            long worldAddr = 0;
+                byte[] d1 = BulkRead(mem, wVal, 0x500);
 
-            foreach (var (name, patStr) in worldPatterns)
-            {
-                byte?[] pat = Parse(patStr);
-                var matches = Scan(data, pat);
+                // Level 1: wVal icerisinde list ara
+                TryFindList(mem, d1, wVal, LP,
+                    $"W+0x{wOff:X}", ref fList, ref fMax, ref fStride, ref fPath);
+                if (fList != 0) break;
 
-                foreach (int pos in matches)
+                // Level 2: wVal'in alt pointer'lari
+                var p1 = GetPointers(d1);
+                int sc = 0;
+                foreach (var (s1Off, s1Val) in p1)
                 {
-                    int disp = BitConverter.ToInt32(data, pos + 3);
-                    long resolved = (long)pos + 7 + disp;
-                    if (resolved <= 0 || resolved >= moduleSize) continue;
+                    if (fList != 0 || sc++ > 50) break;
 
-                    long addr = baseAddr + resolved;
-                    long ptr = mem.Read<long>(addr);
-                    if (ptr == 0 || ptr < 0x10000) continue;
+                    byte[] d2 = BulkRead(mem, s1Val, 0x500);
+                    TryFindList(mem, d2, s1Val, LP,
+                        $"W+0x{wOff:X}->+0x{s1Off:X}", ref fList, ref fMax, ref fStride, ref fPath);
+                    if (fList != 0) break;
 
-                    long lp = mem.Read<long>(ptr + 0x8);
-                    if (lp == 0 || lp < 0x10000) continue;
-
-                    // Birden fazla HP offset dene
-                    float hp = 0;
-                    long hpOff = 0;
-                    foreach (long h in new long[] { 0x280, 0x2C0, 0x284, 0x288 })
+                    // Level 3: bir kademe daha
+                    var p2 = GetPointers(d2);
+                    int sc2 = 0;
+                    foreach (var (s2Off, s2Val) in p2)
                     {
-                        float test = mem.Read<float>(lp + h);
-                        if (test > 0 && test < 10000) { hp = test; hpOff = h; break; }
+                        if (fList != 0 || sc2++ > 20) break;
+                        byte[] d3 = BulkRead(mem, s2Val, 0x500);
+                        TryFindList(mem, d3, s2Val, LP,
+                            $"W+0x{wOff:X}->+0x{s1Off:X}->+0x{s2Off:X}", ref fList, ref fMax, ref fStride, ref fPath);
                     }
-
-                    if (hp <= 0) continue;
-
-                    // Navigation testi
-                    Vector3 lpPos = new Vector3();
-                    long navOff = 0;
-                    foreach (long n in new long[] { 0x90, 0x30, 0x50 })
-                    {
-                        long nav = mem.Read<long>(lp + n);
-                        if (nav == 0 || nav < 0x10000) continue;
-                        Vector3 p = mem.Read<Vector3>(nav + 0x50);
-                        if (MathF.Abs(p.X) > 0.1f || MathF.Abs(p.Y) > 0.1f)
-                        { lpPos = p; navOff = n; break; }
-                    }
-
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.WriteLine($"  {name} BULUNDU!");
-                    Console.WriteLine($"    WORLD_OFFSET = 0x{resolved:X}");
-                    Console.WriteLine($"    World:  0x{ptr:X}");
-                    Console.WriteLine($"    LP:     0x{lp:X}");
-                    Console.WriteLine($"    HP:     {hp:F1} (offset: 0x{hpOff:X})");
-                    Console.WriteLine($"    NavOff: 0x{navOff:X}");
-                    Console.WriteLine($"    Pos:    ({lpPos.X:F1}, {lpPos.Y:F1}, {lpPos.Z:F1})");
-                    Console.ResetColor();
-
-                    if (worldOffset == 0) { worldOffset = resolved; worldAddr = addr; }
                 }
             }
 
-            // Brute force fallback
-            if (worldOffset == 0)
+            Console.WriteLine();
+
+            if (fList != 0)
             {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("\n  Pattern basarisiz. Brute-force taraniyor...\n");
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"\n  PED LIST BULUNDU!");
+                Console.WriteLine($"    Path:   {fPath}");
+                Console.WriteLine($"    List:   0x{fList:X}");
+                Console.WriteLine($"    Max:    {fMax}");
+                Console.WriteLine($"    Stride: 0x{fStride:X}");
                 Console.ResetColor();
 
-                int start = (int)(moduleSize * 0.5);
-                start = (start / 8) * 8;
-
-                for (int off = start; off < moduleSize - 8; off += 8)
+                // Ped detaylari
+                Console.WriteLine("\n  -- Bulunan Pedler --\n");
+                int shown = 0;
+                for (int i = 0; i < Math.Min(fMax, 200) && shown < 10; i++)
                 {
-                    long val = BitConverter.ToInt64(data, off);
-                    if (val < 0x10000 || val > 0x7FFFFFFFFFFF) continue;
+                    long ped = mem.Read<long>(fList + (i * fStride));
+                    if (ped < 0x10000 || ped == LP) continue;
+                    float hp = mem.Read<float>(ped + 0x280);
+                    if (hp <= 0 || hp > 10000) continue;
 
-                    long lp = mem.Read<long>(val + 0x8);
-                    if (lp < 0x10000 || lp > 0x7FFFFFFFFFFF) continue;
+                    long nav = mem.Read<long>(ped + 0x30);
+                    Vector3 pp = nav > 0x10000 ? mem.Read<Vector3>(nav + 0x50) : new Vector3();
 
-                    float hp = mem.Read<float>(lp + 0x280);
-                    if (hp <= 0 || hp >= 10000)
+                    // PedType aday offset'leri tara
+                    string ptInfo = "";
+                    foreach (long ptOff in new long[] { 0x10B8, 0x10A8, 0x10C8, 0x10D8, 0x1088, 0x1098 })
                     {
-                        hp = mem.Read<float>(lp + 0x2C0);
-                        if (hp <= 0 || hp >= 10000) continue;
+                        int pt = mem.Read<int>(ped + ptOff);
+                        ptInfo += $" 0x{ptOff:X}={pt}({pt & 0xFF})";
                     }
 
-                    long nav = mem.Read<long>(lp + 0x90);
-                    if (nav < 0x10000) { nav = mem.Read<long>(lp + 0x30); }
-                    if (nav < 0x10000) continue;
-
-                    Vector3 p = mem.Read<Vector3>(nav + 0x50);
-                    if (MathF.Abs(p.X) < 0.1f && MathF.Abs(p.Y) < 0.1f) continue;
-
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.WriteLine($"  BRUTE BULUNDU!");
-                    Console.WriteLine($"    Offset: 0x{off:X}");
-                    Console.WriteLine($"    World: 0x{val:X}  LP: 0x{lp:X}");
-                    Console.WriteLine($"    HP: {hp:F1}  Pos: ({p.X:F1}, {p.Y:F1}, {p.Z:F1})");
-                    Console.ResetColor();
-
-                    if (worldOffset == 0) { worldOffset = off; worldAddr = baseAddr + off; }
-                    break;
-                }
-            }
-
-            if (worldOffset == 0)
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("\n  [X] WORLD BULUNAMADI! Tum ciktiyi bana gonder.\n");
-                Console.ResetColor();
-                Console.ReadLine();
-                return;
-            }
-
-            // ═══════════════════════════════════════
-            //  2. REPLAY + PED LIST — World uzerinden
-            // ═══════════════════════════════════════
-            Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.WriteLine("\n══════ REPLAY + PED LIST ══════\n");
-            Console.ResetColor();
-
-            long worldPtr2 = mem.Read<long>(worldAddr);
-            long localPlayer = mem.Read<long>(worldPtr2 + 0x8);
-
-            long foundReplayOff = 0, foundPedIfOff = 0, foundListOff = 0;
-
-            foreach (long rOff in new long[] { 0x10, 0x18, 0x20, 0x28, 0x30, 0x38 })
-            {
-                long replay = mem.Read<long>(worldPtr2 + rOff);
-                if (replay < 0x10000) continue;
-
-                foreach (long pOff in new long[] { 0x10, 0x18, 0x20, 0x28 })
-                {
-                    long pedIf = mem.Read<long>(replay + pOff);
-                    if (pedIf < 0x10000) continue;
-
-                    foreach (long lOff in new long[] { 0x100, 0x108, 0x110, 0x1F0, 0x1F8, 0x200, 0x240, 0x248 })
+                    // Skeleton tara
+                    string skelInfo = "yok";
+                    foreach (long sOff in new long[] { 0x430, 0x410, 0x420, 0x440, 0x450,
+                        0x460, 0x380, 0x390, 0x3A0, 0x3B0, 0x3C0, 0x3D0, 0x3E0, 0x3F0, 0x400, 0x470, 0x480 })
                     {
-                        long list = mem.Read<long>(pedIf + lOff);
-                        int max = mem.Read<int>(pedIf + lOff + 0x8);
-
-                        if (list < 0x10000 || max <= 0 || max > 1000) continue;
-
-                        // Bu listedeki ilk ped'i dogrula
-                        bool valid = false;
-                        for (int s = 0x8; s <= 0x10; s += 0x8)
+                        long sk = mem.Read<long>(ped + sOff);
+                        if (sk < 0x10000 || sk > 0x7FFFFFFFFFFF) continue;
+                        for (long bcOff = 0; bcOff <= 0x30; bcOff += 8)
                         {
-                            for (int i = 0; i < Math.Min(max, 30); i++)
+                            long bc = mem.Read<long>(sk + bcOff);
+                            if (bc < 0x10000 || bc > 0x7FFFFFFFFFFF) continue;
+                            Vector3 b0 = mem.Read<Vector3>(bc + 0x10);
+                            if (MathF.Abs(b0.X) < 3 && MathF.Abs(b0.Y) < 3 && MathF.Abs(b0.Z) < 3
+                                && (MathF.Abs(b0.X) > 0.001f || MathF.Abs(b0.Y) > 0.001f || MathF.Abs(b0.Z) > 0.001f))
                             {
-                                long ped = mem.Read<long>(list + (i * s));
-                                if (ped < 0x10000 || ped == localPlayer) continue;
-                                float h = mem.Read<float>(ped + 0x280);
-                                if (h <= 0 || h > 10000)
-                                {
-                                    h = mem.Read<float>(ped + 0x2C0);
-                                }
-                                if (h > 0 && h < 10000)
-                                {
-                                    valid = true;
-                                    Console.ForegroundColor = ConsoleColor.Green;
-                                    Console.WriteLine($"  BULUNDU!");
-                                    Console.WriteLine($"    Replay:  World+0x{rOff:X} => 0x{replay:X}");
-                                    Console.WriteLine($"    PedIf:   Replay+0x{pOff:X} => 0x{pedIf:X}");
-                                    Console.WriteLine($"    PedList: PedIf+0x{lOff:X} => 0x{list:X}");
-                                    Console.WriteLine($"    PedMax:  PedIf+0x{lOff + 0x8:X} => {max}");
-                                    Console.WriteLine($"    Stride:  0x{s:X}");
-                                    Console.WriteLine($"    Test Ped: 0x{ped:X} HP: {h:F1}");
-                                    Console.ResetColor();
-
-                                    if (foundReplayOff == 0)
-                                    {
-                                        foundReplayOff = rOff;
-                                        foundPedIfOff = pOff;
-                                        foundListOff = lOff;
-                                    }
-                                    break;
-                                }
+                                skelInfo = $"Ped+0x{sOff:X}->+0x{bcOff:X} B0:({b0.X:F3},{b0.Y:F3},{b0.Z:F3})";
+                                goto skelDone;
                             }
-                            if (valid) break;
                         }
-                        if (valid) break;
                     }
-                    if (foundReplayOff != 0) break;
+                    skelDone:
+
+                    Console.ForegroundColor = ConsoleColor.White;
+                    Console.WriteLine($"  [{i}] 0x{ped:X}");
+                    Console.WriteLine($"      HP: {hp:F1}  Pos: ({pp.X:F1},{pp.Y:F1},{pp.Z:F1})");
+                    Console.WriteLine($"      PedType:{ptInfo}");
+                    Console.WriteLine($"      Skeleton: {skelInfo}");
+                    Console.ResetColor();
+                    Console.WriteLine();
+                    shown++;
                 }
-                if (foundReplayOff != 0) break;
-            }
 
-            if (foundReplayOff == 0)
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("  [X] Ped listesi bulunamadi!\n");
-                Console.ResetColor();
-            }
-
-            // ═══════════════════════════════════════
-            //  3. VIEWMATRIX — Pattern Scan
-            // ═══════════════════════════════════════
-            Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.WriteLine("\n══════ VIEWMATRIX ══════\n");
-            Console.ResetColor();
-
-            var vmPatterns = new[]
-            {
-                ("VM1", "48 8B 15 ?? ?? ?? ?? 48 8D 2D ?? ?? ?? ?? 48 8B CD"),
-                ("VM2", "48 8B 15 ?? ?? ?? ?? 45 33 C0 48 8B CD"),
-                ("VM3", "48 8B 3D ?? ?? ?? ?? 48 8B CF E8"),
-                ("VM4", "48 8B 0D ?? ?? ?? ?? 48 8D 55 ?? E8"),
-                ("VM5", "48 8B 05 ?? ?? ?? ?? 48 8B 48 ?? 48 8D 54 24 ?? E8"),
-            };
-
-            long vmPtrOffset = 0;
-            long vmStructOffset = 0;
-
-            foreach (var (name, patStr) in vmPatterns)
-            {
-                byte?[] pat = Parse(patStr);
-                var matches = Scan(data, pat);
-
-                foreach (int pos in matches)
+                if (shown == 0)
                 {
-                    int disp = BitConverter.ToInt32(data, pos + 3);
-                    long resolved = (long)pos + 7 + disp;
-                    if (resolved <= 0 || resolved >= moduleSize) continue;
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine("  Yakininda HP'si olan ped yok! Birinin yanina git.");
+                    Console.ResetColor();
+                }
+            }
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("\n  [X] PED LIST BULUNAMADI (World uzerinden)");
+                Console.ResetColor();
 
-                    long addr = baseAddr + resolved;
-                    long ptr = mem.Read<long>(addr);
-                    if (ptr < 0x10000) continue;
+                // Fallback: LP uzerinden ped type ve skeleton tara
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("\n  LP uzerinden skeleton taraniyor...\n");
+                Console.ResetColor();
+            }
 
-                    foreach (long mOff in new long[] {
-                        0x0, 0x20, 0x60, 0xA0, 0x100, 0x180,
-                        0x1E0, 0x200, 0x24C, 0x260, 0x280, 0x2A0,
-                        0x300, 0x340, 0x380, 0x3D0, 0x400, 0x450,
-                        0x4A0, 0x500, 0x580, 0x600 })
+            // ═══════════════════════════════════
+            //  3. LP SKELETON SCAN
+            // ═══════════════════════════════════
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("\n══════ LP SKELETON SCAN ══════\n");
+            Console.ResetColor();
+
+            bool skelFound = false;
+            for (long o = 0x100; o <= 0x800 && !skelFound; o += 8)
+            {
+                long sk = mem.Read<long>(LP + o);
+                if (sk < 0x10000 || sk > 0x7FFFFFFFFFFF) continue;
+
+                for (long bc = 0; bc <= 0x30 && !skelFound; bc += 8)
+                {
+                    long b = mem.Read<long>(sk + bc);
+                    if (b < 0x10000 || b > 0x7FFFFFFFFFFF) continue;
+
+                    for (int st = 0x10; st <= 0x40 && !skelFound; st += 0x10)
                     {
-                        byte[] matBuf = new byte[64];
-                        if (!ZetaMemory.ReadProcessMemory(mem.ProcessHandle, ptr + mOff, matBuf, 64, out IntPtr br2)) continue;
-                        if (br2.ToInt64() != 64) continue;
+                        Vector3 b0 = mem.Read<Vector3>(b + 0x10);
+                        Vector3 b5 = mem.Read<Vector3>(b + (5 * st) + 0x10);
+                        Vector3 b8 = mem.Read<Vector3>(b + (8 * st) + 0x10);
 
-                        float[] mat = new float[16];
-                        Buffer.BlockCopy(matBuf, 0, mat, 0, 64);
+                        bool v0 = MathF.Abs(b0.X) < 3 && MathF.Abs(b0.Y) < 3 && MathF.Abs(b0.Z) < 3;
+                        bool v5 = MathF.Abs(b5.X) < 3 && MathF.Abs(b5.Y) < 3 && MathF.Abs(b5.Z) < 3;
+                        bool v8 = MathF.Abs(b8.X) < 3 && MathF.Abs(b8.Y) < 3 && MathF.Abs(b8.Z) < 3;
+                        bool nz = MathF.Abs(b0.X) > 0.001f || MathF.Abs(b0.Y) > 0.001f || MathF.Abs(b0.Z) > 0.001f;
 
-                        bool hasNaN = false;
-                        bool allZero = true;
-                        int reasonable = 0;
-
-                        for (int mi = 0; mi < 16; mi++)
+                        if (v0 && v5 && v8 && nz)
                         {
-                            if (float.IsNaN(mat[mi]) || float.IsInfinity(mat[mi])) { hasNaN = true; break; }
-                            if (MathF.Abs(mat[mi]) > 0.0001f) allZero = false;
-                            if (MathF.Abs(mat[mi]) > 0.0001f && MathF.Abs(mat[mi]) < 100f) reasonable++;
+                            Console.ForegroundColor = ConsoleColor.Green;
+                            Console.WriteLine($"  SKELETON BULUNDU!");
+                            Console.WriteLine($"    Offset: LP+0x{o:X}");
+                            Console.WriteLine($"    BoneCache: Skel+0x{bc:X}");
+                            Console.WriteLine($"    Stride: 0x{st:X}");
+                            Console.WriteLine($"    B0: ({b0.X:F3}, {b0.Y:F3}, {b0.Z:F3})");
+                            Console.WriteLine($"    B5: ({b5.X:F3}, {b5.Y:F3}, {b5.Z:F3})");
+                            Console.WriteLine($"    B8: ({b8.X:F3}, {b8.Y:F3}, {b8.Z:F3})");
+                            Console.ResetColor();
+                            skelFound = true;
                         }
-
-                        if (hasNaN || allZero || reasonable < 8) continue;
-
-                        Console.ForegroundColor = ConsoleColor.Green;
-                        Console.WriteLine($"  {name} BULUNDU!");
-                        Console.WriteLine($"    Ptr Offset:    0x{resolved:X}");
-                        Console.WriteLine($"    Struct Offset: 0x{mOff:X}");
-                        Console.WriteLine($"    Ptr: 0x{ptr:X}");
-                        Console.WriteLine($"    [{mat[0]:F4}, {mat[1]:F4}, {mat[2]:F4}, {mat[3]:F4}]");
-                        Console.WriteLine($"    [{mat[4]:F4}, {mat[5]:F4}, {mat[6]:F4}, {mat[7]:F4}]");
-                        Console.WriteLine($"    [{mat[8]:F4}, {mat[9]:F4}, {mat[10]:F4}, {mat[11]:F4}]");
-                        Console.WriteLine($"    [{mat[12]:F4}, {mat[13]:F4}, {mat[14]:F4}, {mat[15]:F4}]");
-                        Console.ResetColor();
-
-                        if (vmPtrOffset == 0)
-                        { vmPtrOffset = resolved; vmStructOffset = mOff; }
                     }
                 }
             }
 
-            if (vmPtrOffset == 0)
+            if (!skelFound)
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("  [X] ViewMatrix bulunamadi!\n");
+                Console.WriteLine("  [X] Skeleton bulunamadi");
                 Console.ResetColor();
             }
 
-            // ═══════════════════════════════════════
-            //  SONUC
-            // ═══════════════════════════════════════
-            Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.WriteLine("\n═══════════════════════════════════════");
-            Console.WriteLine("        BULUNAN OFFSET'LER");
-            Console.WriteLine("═══════════════════════════════════════\n");
-            Console.ResetColor();
-
-            Console.ForegroundColor = ConsoleColor.White;
-            Console.WriteLine($"  WORLD_OFFSET           = 0x{worldOffset:X}");
-            Console.WriteLine($"  REPLAY (World+)        = 0x{foundReplayOff:X}");
-            Console.WriteLine($"  PED_INTERFACE (Replay+) = 0x{foundPedIfOff:X}");
-            Console.WriteLine($"  PED_LIST (PedIf+)      = 0x{foundListOff:X}");
-            Console.WriteLine($"  VIEWMATRIX_PTR         = 0x{vmPtrOffset:X}");
-            Console.WriteLine($"  VIEWMATRIX_STRUCT      = 0x{vmStructOffset:X}");
-            Console.ResetColor();
-
+            // ═══════════════════════════════════
+            //  4. LP PEDTYPE SCAN
+            // ═══════════════════════════════════
             Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine("\n  >>> BU CIKTIYI KOPYALA VE BANA GONDER! <<<");
+            Console.WriteLine("\n══════ LP PEDTYPE SCAN ══════\n");
             Console.ResetColor();
-            Console.WriteLine("\nENTER'a bas...");
+
+            Console.WriteLine("  LP PedType adaylari (deger=2 olan player):");
+            for (long o = 0x1000; o <= 0x1200; o += 4)
+            {
+                int val = mem.Read<int>(LP + o);
+                if ((val & 0xFF) == 2 && val < 256)
+                {
+                    Console.WriteLine($"    LP+0x{o:X} = {val} (byte: {val & 0xFF})");
+                }
+            }
+
+            // ═══════════════════════════════════
+            //  OZET
+            // ═══════════════════════════════════
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("\n═════════════════════════════════════");
+            Console.WriteLine("  PHASE 2 TAMAMLANDI!");
+            Console.WriteLine("  TUM CIKTIYI KOPYALA → BANA GONDER!");
+            Console.WriteLine("═════════════════════════════════════\n");
+            Console.ResetColor();
             Console.ReadLine();
         }
         catch (Exception ex)
@@ -380,29 +268,69 @@ class Program
         }
     }
 
-    static byte?[] Parse(string p)
+    static byte[] BulkRead(ZetaMemory mem, long addr, int size)
     {
-        string[] s = p.Split(' ');
-        byte?[] r = new byte?[s.Length];
-        for (int i = 0; i < s.Length; i++)
-            r[i] = s[i] == "??" ? null : Convert.ToByte(s[i], 16);
+        byte[] buf = new byte[size];
+        ZetaMemory.ReadProcessMemory(mem.ProcessHandle, addr, buf, size, out _);
+        return buf;
+    }
+
+    static List<(int off, long val)> GetPointers(byte[] data)
+    {
+        var r = new List<(int, long)>();
+        for (int i = 0; i <= data.Length - 8; i += 8)
+        {
+            long v = BitConverter.ToInt64(data, i);
+            if (v > 0x10000 && v < 0x7FFFFFFFFFFF)
+                r.Add((i, v));
+        }
         return r;
     }
 
-    static List<int> Scan(byte[] data, byte?[] pat)
+    static void TryFindList(ZetaMemory mem, byte[] data, long structAddr, long LP, string path,
+        ref long fList, ref int fMax, ref int fStride, ref string fPath)
     {
-        var r = new List<int>();
-        int lim = data.Length - pat.Length;
-        for (int i = 0; i <= lim; i++)
+        if (fList != 0) return;
+
+        for (int j = 0; j <= data.Length - 16; j += 8)
         {
-            bool ok = true;
-            for (int j = 0; j < pat.Length; j++)
+            if (fList != 0) return;
+
+            long ptr = BitConverter.ToInt64(data, j);
+            if (ptr < 0x10000 || ptr > 0x7FFFFFFFFFFF) continue;
+
+            int cnt = BitConverter.ToInt32(data, j + 8);
+            if (cnt <= 0 || cnt > 1000) continue;
+
+            // Stride 0x10 ve 0x8 dene
+            for (int stride = 0x10; stride >= 0x8; stride -= 0x8)
             {
-                if (pat[j].HasValue && data[i + j] != pat[j].Value)
-                { ok = false; break; }
+                int valid = 0;
+                for (int k = 0; k < Math.Min(cnt, 10); k++)
+                {
+                    long ped = mem.Read<long>(ptr + (k * stride));
+                    if (ped < 0x10000 || ped == LP || ped > 0x7FFFFFFFFFFF) continue;
+
+                    float hp = mem.Read<float>(ped + 0x280);
+                    if (hp <= 0 || hp > 10000) continue;
+
+                    long nav = mem.Read<long>(ped + 0x30);
+                    if (nav < 0x10000) continue;
+
+                    Vector3 p = mem.Read<Vector3>(nav + 0x50);
+                    if (MathF.Abs(p.X) > 0.1f || MathF.Abs(p.Y) > 0.1f)
+                        valid++;
+                }
+
+                if (valid >= 1)
+                {
+                    fPath = $"{path}->+0x{j:X}";
+                    fList = ptr;
+                    fMax = cnt;
+                    fStride = stride;
+                    return;
+                }
             }
-            if (ok) r.Add(i);
         }
-        return r;
     }
 }

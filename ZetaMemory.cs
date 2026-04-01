@@ -52,7 +52,6 @@ public class ZetaMemory : IDisposable
         {
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine($"[!] Erisim hatasi: {ex.Message}");
-            Console.WriteLine("[!] Yonetici olarak calistirin!");
             Console.ResetColor();
             return false;
         }
@@ -61,33 +60,14 @@ public class ZetaMemory : IDisposable
     public T Read<T>(long address) where T : struct
     {
         if (address == 0 || address < 0x10000) return default;
-
         int size = Marshal.SizeOf(typeof(T));
         byte[] buffer = new byte[size];
         bool success = ReadProcessMemory(ProcessHandle, address, buffer, size, out IntPtr bytesRead);
-
         if (!success || bytesRead.ToInt64() != size) return default;
 
         GCHandle handle = GCHandle.Alloc(buffer, GCHandleType.Pinned);
-        try
-        {
-            return (T)Marshal.PtrToStructure(handle.AddrOfPinnedObject(), typeof(T))!;
-        }
-        finally
-        {
-            handle.Free();
-        }
-    }
-
-    public long ReadPointerChain(long baseAddr, params long[] offsets)
-    {
-        long current = baseAddr;
-        for (int i = 0; i < offsets.Length; i++)
-        {
-            current = Read<long>(current + offsets[i]);
-            if (current == 0 || current < 0x10000) return 0;
-        }
-        return current;
+        try { return (T)Marshal.PtrToStructure(handle.AddrOfPinnedObject(), typeof(T))!; }
+        finally { handle.Free(); }
     }
 
     public void Dispose()
